@@ -1,0 +1,15 @@
+# Secrets and local config — never commit these
+.env
+rclone.conf
+
+# Local backup copies
+backups/
+*.zip
+*.gpg
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

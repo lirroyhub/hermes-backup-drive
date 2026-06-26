@@ -1,0 +1,33 @@
+services:
+  hermes-backup:
+    build: .
+    image: hermes-backup-docker:latest
+    container_name: hermes-backup
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # These can also live in .env; shown here so the wiring is obvious.
+      TZ: ${TZ:-UTC}
+      BACKUP_CRON: ${BACKUP_CRON:-0 3 * * *}
+      HERMES_HOME: /data/hermes
+      OUTPUT_DIR: /backups
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-gdrive}
+      RCLONE_REMOTE_PATH: ${RCLONE_REMOTE_PATH:-hermes-backups}
+      BACKUP_MODE: ${BACKUP_MODE:-full}
+      RETENTION_DAYS: ${RETENTION_DAYS:-14}
+      ENCRYPT: ${ENCRYPT:-false}
+      GPG_PASSPHRASE: ${GPG_PASSPHRASE:-}
+      RUN_ON_START: ${RUN_ON_START:-false}
+    volumes:
+      # 1. Your Hermes data directory (the thing being backed up). READ-ONLY:
+      #    hermes backup only needs to read it, and ro protects you from
+      #    accidental writes. Adjust the host path to your real ~/.hermes.
+      - ${HERMES_DATA_PATH:-~/.hermes}:/data/hermes:ro
+
+      # 2. rclone config containing your Google Drive remote. READ-ONLY.
+      - ${RCLONE_CONFIG_PATH:-./rclone.conf}:/root/.config/rclone/rclone.conf:ro
+
+      # 3. Local copies of the backups (also pushed to Drive). Persisted so a
+      #    failed upload still leaves you a copy on disk.
+      - ./backups:/backups
