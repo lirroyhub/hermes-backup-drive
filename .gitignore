@@ -1,15 +1,26 @@
-# Secrets and local config — never commit these
+# --- Secrets (NEVER commit) -------------------------------------------------
 .env
-rclone.conf
+*.env
+!.env.example
+secrets/
+*.backup
 
-# Local backup copies
+# --- Backups / local data ---------------------------------------------------
 backups/
 *.zip
-*.gpg
+*.zip.gpg
+*.tar.gz
 
-# OS / editor noise
+# --- rclone credentials -----------------------------------------------------
+rclone.conf
+config/
+
+# --- OS / editor noise ------------------------------------------------------
 .DS_Store
-Thumbs.db
 *.swp
+*~
 .idea/
 .vscode/
+
+# --- Logs -------------------------------------------------------------------
+*.log

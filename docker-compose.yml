@@ -1,33 +1,45 @@
+# Standalone backup stack for a Hermes Agent that is installed and running
+# directly on the host machine (NOT in this compose project).
+#
+# This compose file runs ONE service — the backup container. It does not run
+# Hermes itself. It reaches your Hermes data by bind-mounting the host's
+# ~/.hermes directory read-only.
 services:
-  hermes-backup:
-    build: .
-    image: hermes-backup-docker:latest
+  backup:
+    build:
+      context: ./backup
+      dockerfile: Dockerfile
+    image: hermes-backup:latest
     container_name: hermes-backup
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
-      # These can also live in .env; shown here so the wiring is obvious.
-      TZ: ${TZ:-UTC}
-      BACKUP_CRON: ${BACKUP_CRON:-0 3 * * *}
-      HERMES_HOME: /data/hermes
-      OUTPUT_DIR: /backups
-      RCLONE_REMOTE: ${RCLONE_REMOTE:-gdrive}
-      RCLONE_REMOTE_PATH: ${RCLONE_REMOTE_PATH:-hermes-backups}
-      BACKUP_MODE: ${BACKUP_MODE:-full}
-      RETENTION_DAYS: ${RETENTION_DAYS:-14}
-      ENCRYPT: ${ENCRYPT:-false}
-      GPG_PASSPHRASE: ${GPG_PASSPHRASE:-}
-      RUN_ON_START: ${RUN_ON_START:-false}
+      RCLONE_REMOTE: "${RCLONE_REMOTE:-gdrive}"
+      RCLONE_DEST_PATH: "${RCLONE_DEST_PATH:-hermes-backups}"
+      RETENTION_DAYS: "${RETENTION_DAYS:-30}"
+      BACKUP_MODE: "${BACKUP_MODE:-full}"
+      ENCRYPT: "${ENCRYPT:-false}"
+      GPG_PASSPHRASE: "${GPG_PASSPHRASE:-}"
+      TZ: "${TZ:-America/Montevideo}"
+      # Hermes reads its data from here; matches the /data mount below.
+      HERMES_HOME: /data
+      # Tell rclone to read its config from the mounted volume, not the default path.
+      RCLONE_CONFIG: /config/rclone/rclone.conf
     volumes:
-      # 1. Your Hermes data directory (the thing being backed up). READ-ONLY:
-      #    hermes backup only needs to read it, and ro protects you from
-      #    accidental writes. Adjust the host path to your real ~/.hermes.
-      - ${HERMES_DATA_PATH:-~/.hermes}:/data/hermes:ro
+      # 1. Your Hermes data directory on the HOST, mounted read-only.
+      #    `hermes backup` only needs to read it; ro protects against accidental
+      #    writes. Set HERMES_DATA_PATH in .env to an ABSOLUTE path (a literal
+      #    "~" can be unreliable in compose volume sources).
+      - "${HERMES_DATA_PATH:-/root/.hermes}:/data:ro"
 
-      # 2. rclone config containing your Google Drive remote. READ-ONLY.
-      - ${RCLONE_CONFIG_PATH:-./rclone.conf}:/root/.config/rclone/rclone.conf:ro
+      # 2. rclone config (Google Drive token). Persisted in a named volume so
+      #    the credential survives image rebuilds. You seed it once via the
+      #    host-side auth flow (README section 4).
+      - backup-rclone:/config/rclone
 
-      # 3. Local copies of the backups (also pushed to Drive). Persisted so a
-      #    failed upload still leaves you a copy on disk.
-      - ./backups:/backups
+      # 3. Local staging copy of the backups before/after upload. Persisted so
+      #    a failed upload still leaves you a copy on disk.
+      - backup-staging:/backups
+
+volumes:
+  backup-rclone:
+  backup-staging:

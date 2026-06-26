@@ -1,203 +1,250 @@
-# Hermes Backup → Google Drive (Dockerized)
+# Hermes Agent → Google Drive Backup (Dockerized)
 
-A self-contained Docker setup that runs **[Hermes Agent](https://github.com/NousResearch/hermes-agent)**'s
-first-party `hermes backup` on a daily schedule and uploads the resulting
-archive to a **Google Drive** folder — with optional encryption and automatic
-retention.
+A small, standalone Docker Compose stack that backs up a **[Hermes Agent](https://github.com/NousResearch/hermes-agent)**
+install running directly on your machine, and uploads the archive to **Google
+Drive** on a daily schedule — with optional encryption and automatic retention.
 
-Everything runs inside the container. You do **not** need Hermes, rclone, or
-any other tool installed on the host — only Docker and Docker Compose.
+It runs Hermes' own `hermes backup` command (which takes a *consistent* SQLite
+snapshot even while the agent is running), inside a container, so the only
+things you need on the host are Docker and rclone-for-auth (one-time).
+
+> **Scope:** this stack does **not** run Hermes. It assumes Hermes is already
+> installed and running on the host, and backs up its data directory
+> (`~/.hermes`). The backup container is the only service here.
 
 ---
 
-## What it does
+## How it works
 
-On a schedule (default: daily at 03:00):
+A container-native cron (`supercronic`) runs once a day (default 03:30, your
+timezone) and executes `backup.sh`, which:
 
-1. Runs `hermes backup`, which produces a consistent zip of your Hermes
-   config, skills, sessions, and memory — safe to run even while the agent is
-   running, because it uses SQLite's online `backup()` API.
-2. Optionally encrypts the archive with `gpg` (AES-256).
-3. Saves a local copy under `./backups/`.
-4. Uploads the archive to your Google Drive folder via `rclone`.
-5. Prunes backups older than `RETENTION_DAYS`, locally and on Drive.
+1. Runs `hermes backup` against your mounted `~/.hermes` → a consistent zip
+   (config, skills, sessions, memory). Uses SQLite's online `backup()` API, so
+   it's safe even while the agent is live.
+2. Optionally encrypts the zip with `gpg` (AES-256).
+3. Uploads it to a **dated folder** in Google Drive
+   (`gdrive:hermes-backups/2026-06-26/`) via rclone.
+4. Keeps a local staging copy and prunes anything older than `RETENTION_DAYS`,
+   both locally and on Drive.
 
-> **Why encryption matters:** the Hermes backup includes your `.env` with API
-> keys and bot tokens. If the archive leaks, those leak with it. Turning on
-> `ENCRYPT=true` is strongly recommended for anything pushed off-machine.
+```
+┌──────────────────────────── your Mac / Linux host ────────────────────────┐
+│                                                                            │
+│   Hermes Agent (installed natively)  ──writes──►  ~/.hermes                │
+│                                                      │ (bind mount, ro)    │
+│   ┌─────────────── docker compose (this repo) ───────┼──────────────────┐  │
+│   │  backup container                                ▼                  │  │
+│   │   supercronic ──► backup.sh ──► hermes backup ──► /data (ro)         │  │
+│   │                         │                                           │  │
+│   │                         ├─► gpg (optional)                          │  │
+│   │                         └─► rclone copy ──────────────────────────► │──┼──► Google Drive
+│   └─────────────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
 ## Requirements
 
-- Docker and Docker Compose on the host.
-- A Hermes data directory on the host (normally `~/.hermes`). This is what gets
-  backed up. The container mounts it **read-only**.
+- Docker + Docker Compose on the host.
+- A Hermes install on the host (its data dir, normally `~/.hermes`).
 - A Google account / Google Drive.
+- rclone on the host **once**, only to authorize Google Drive (see section 4).
+  On macOS Catalina, use the bundled installer for a compatible build.
 
 ---
 
-## Quick start
+## 1. Get the repo and configure
 
 ```bash
-# 1. Clone your copy of this repo
-git clone <your-repo-url> hermes-backup-docker
-cd hermes-backup-docker
+git clone <your-repo-url> hermes-backup
+cd hermes-backup
 
-# 2. Configure
 cp .env.example .env
-$EDITOR .env            # set TZ, HERMES_DATA_PATH, schedule, etc.
-
-# 3. Set up the Google Drive remote (one-time; see next section)
-#    This produces an rclone.conf in the project directory.
-
-# 4. Build and start
-docker compose up -d --build
-
-# 5. (Optional) trigger a test run immediately
-docker compose run --rm -e RUN_ON_START=true hermes-backup
-# ...or set RUN_ON_START=true in .env for the first boot.
-
-# Watch logs
-docker compose logs -f
+$EDITOR .env
 ```
 
+In `.env`, the one value you **must** get right is `HERMES_DATA_PATH` — the
+absolute path to your Hermes data dir on the host:
+
+```ini
+HERMES_DATA_PATH=/Users/you/.hermes      # macOS
+# HERMES_DATA_PATH=/home/you/.hermes     # Linux
+# HERMES_DATA_PATH=/root/.hermes         # root install
+```
+
+Use an **absolute** path. A literal `~` is unreliable as a Compose volume
+source.
+
 ---
 
-## Setting up the Google Drive remote
-
-`rclone` needs a one-time OAuth authorization to talk to Google Drive. Because
-authorization opens a browser, the easiest path is to authorize **once on any
-machine that has a browser**, then copy the resulting `rclone.conf` into this
-project. You do not need to keep rclone installed afterward.
-
-### Option A — authorize on a machine with a browser (recommended)
-
-On any desktop/laptop with a browser:
+## 2. Build the image
 
 ```bash
-# Install rclone temporarily (or use an existing install)
-curl -fsSL https://rclone.org/install.sh | sudo bash
+docker compose build
+```
 
-# Run the interactive config
+This installs rclone, supercronic, and the Hermes CLI into the image. The
+Hermes installer needs outbound access to `github.com` and
+`raw.githubusercontent.com`.
+
+> If the Hermes install step errors, the build still finishes (so a transient
+> network blip doesn't wipe your tooling). `backup.sh` checks for the `hermes`
+> binary at runtime and fails with a clear message. See **Troubleshooting**.
+
+---
+
+## 3. Start the scheduler
+
+```bash
+docker compose up -d
+docker compose logs -f          # watch it report the schedule
+```
+
+The container now sits idle until the daily cron fires. It restarts on reboot
+(`restart: unless-stopped`).
+
+---
+
+## 4. Connect Google Drive (one-time, host-side)
+
+**Why host-side:** authorizing rclone from *inside* the container does not work
+on a Mac. rclone's OAuth flow opens a local server on `127.0.0.1:53682` that
+your host browser can't reach across the container boundary. So you authorize
+on the host, then copy the resulting config into the container's volume.
+
+### 4a. Install rclone on the host (skip if you already have it)
+
+Modern macOS / Linux: `curl -fsSL https://rclone.org/install.sh | sudo bash`
+
+**macOS Catalina (10.15):** newer rclone builds crash with a `dyld: Symbol not
+found: _SecTrustCopyCertificateChain` error. Use the bundled installer, which
+pins the last Catalina-compatible release (v1.70.3) into `~/bin`, no sudo:
+
+```bash
+./install-rclone-catalina.sh
+```
+
+### 4b. Authorize Google Drive
+
+```bash
 rclone config
 #  n) New remote
-#  name> gdrive                 # must match RCLONE_REMOTE in .env
+#  name> gdrive                 # MUST match RCLONE_REMOTE in .env
 #  Storage> drive               # Google Drive
-#  client_id / client_secret>   # press Enter to use rclone's defaults
-#                               # (for heavy use, create your own — see rclone docs)
-#  scope> 1                     # full access, or 3 for drive.file (app-created files only)
+#  client_id / client_secret>   # Enter for rclone defaults (fine for personal use)
+#  scope> 1                     # full access  (or 3 = drive.file, app-created files only)
 #  Edit advanced config> n
 #  Use auto config> y           # opens a browser to authorize
-#  Configure as a Shared Drive (Team Drive)> n  (unless you use one)
-#  y) Yes this is OK
-#  q) Quit config
-
-# Find where the config was written
-rclone config file
-# e.g. /home/you/.config/rclone/rclone.conf
+#  Shared Drive (Team Drive)> n (unless you use one)
+#  y) Yes this is OK   →   q) Quit
 ```
 
-Copy that `rclone.conf` into this project directory (next to
-`docker-compose.yml`), or point `RCLONE_CONFIG_PATH` in `.env` at it.
+Headless host with no browser? Answer **n** to "Use auto config" and follow
+rclone's `rclone authorize "drive"` prompt on a machine that has a browser,
+then paste the token back.
 
-### Option B — headless server with no browser
-
-Run `rclone config` on the server; when it asks **"Use auto config?"** answer
-**n**. rclone prints a command to run on a machine that *does* have a browser
-(`rclone authorize "drive"`). Run it there, paste the token back into the
-server prompt. Result is the same `rclone.conf`.
-
-### Verify the remote works
+### 4c. Copy the host config into the container's rclone volume
 
 ```bash
-rclone listremotes                 # should list "gdrive:"
-rclone lsd gdrive:                 # should list your Drive folders
+docker compose run --rm \
+  -v ~/.config/rclone:/host-rclone:ro \
+  backup sh -c "mkdir -p /config/rclone && cp /host-rclone/rclone.conf /config/rclone/rclone.conf && echo copied"
 ```
 
-The container runs this same check on startup and refuses to proceed if the
-remote isn't found, so you'll get a clear error rather than silent failure.
+(On Catalina the host config is in the same place: `~/.config/rclone/rclone.conf`.)
 
-> **Tip — target a specific folder or Shared Drive:** set
-> `RCLONE_REMOTE_PATH` to the folder path inside the remote (e.g.
-> `Backups/Hermes`). rclone creates it if it doesn't exist. For a Shared Drive,
-> configure the `team_drive` ID during `rclone config`.
+### 4d. Verify
+
+```bash
+docker compose run --rm backup rclone listremotes      # should list: gdrive:
+docker compose run --rm backup rclone lsd gdrive:       # should list your Drive folders
+```
+
+The credential now lives in the `backup-rclone` named volume and survives image
+rebuilds.
+
+---
+
+## 5. Test it end-to-end (don't wait for 03:30)
+
+```bash
+docker compose run --rm backup backup-now
+```
+
+Watch it go: `hermes backup` → (encrypt) → upload → prune, ending in `done.`
+Then confirm the file landed:
+
+```bash
+docker compose run --rm backup rclone ls gdrive:hermes-backups
+```
+
+…and check Google Drive in a browser. You should see a dated folder with a
+`hermes-backup_<timestamp>.zip` (or `.zip.gpg` if encryption is on).
+
+---
+
+## 6. Restore (test this at least once)
+
+A backup you've never restored is a hope, not a backup.
+
+```bash
+# If encrypted, decrypt first:
+gpg --decrypt hermes-backup_YYYY-MM-DD_HHMMSS.zip.gpg > restore.zip
+
+# Stop Hermes on the host first to avoid conflicts, then:
+hermes import restore.zip            # prompts before overwriting
+hermes import restore.zip --force    # overwrite without prompting
+```
+
+Do this once against a scratch profile or throwaway machine so you trust it.
 
 ---
 
 ## Configuration reference
 
-All settings live in `.env` (copied from `.env.example`).
+All in `.env`:
 
-| Variable             | Default        | Description                                                                 |
-|----------------------|----------------|-----------------------------------------------------------------------------|
-| `TZ`                 | `UTC`          | Timezone for the schedule, e.g. `America/Montevideo`.                       |
-| `BACKUP_CRON`        | `0 3 * * *`    | When to run (5-field cron). Default: daily 03:00. See scheduling notes.    |
-| `HERMES_DATA_PATH`   | `~/.hermes`    | Host path to the Hermes data dir being backed up (mounted read-only).      |
-| `RCLONE_CONFIG_PATH` | `./rclone.conf`| Host path to your rclone config with the Drive remote.                     |
-| `RCLONE_REMOTE`      | `gdrive`       | Name of the rclone remote (must match `rclone.conf`).                      |
-| `RCLONE_REMOTE_PATH` | `hermes-backups`| Folder path inside the remote to upload into.                             |
-| `BACKUP_MODE`        | `full`         | `full` (complete) or `quick` (state-only fast snapshot).                   |
-| `RETENTION_DAYS`     | `14`           | Delete backups older than N days, local + remote. `0` = keep everything.   |
-| `ENCRYPT`            | `false`        | `true` to gpg-encrypt (AES-256) before upload.                             |
-| `GPG_PASSPHRASE`     | _(empty)_      | Required if `ENCRYPT=true`. Store it OUTSIDE this repo.                     |
-| `RUN_ON_START`       | `false`        | `true` to run one backup immediately on container start.                   |
+| Variable           | Default             | Description                                                         |
+|--------------------|---------------------|---------------------------------------------------------------------|
+| `HERMES_DATA_PATH` | `/Users/you/.hermes`| **Absolute** host path to the Hermes data dir (mounted read-only).  |
+| `BACKUP_MODE`      | `full`              | `full` (complete) or `quick` (state-only fast snapshot).            |
+| `RETENTION_DAYS`   | `30`                | Delete dated backups older than N days, local + Drive. `0` = keep all. |
+| `TZ`               | `America/Montevideo`| Timezone for schedule and container clock.                          |
+| `ENCRYPT`          | `false`             | `true` to gpg-encrypt (AES-256) before upload.                      |
+| `GPG_PASSPHRASE`   | _(empty)_           | Required if `ENCRYPT=true`. Store OUTSIDE this repo.                 |
+| `RCLONE_REMOTE`    | `gdrive`            | rclone remote name (must match what you configured).                |
+| `RCLONE_DEST_PATH` | `hermes-backups`    | Folder path inside Drive; dated subfolders created underneath.      |
 
----
-
-## Scheduling notes
-
-The container schedules itself — no host cron involved. The bundled scheduler
-handles a **simple daily time** (concrete minute + hour in `BACKUP_CRON`)
-directly and precisely. Examples that work out of the box:
-
-- `0 3 * * *` → every day at 03:00
-- `30 23 * * *` → every day at 23:30
-
-If you set a more complex expression (ranges, lists, weekday filters), the
-scheduler falls back to an hourly check. For full cron semantics you can:
-
-- run multiple containers with different daily times, or
-- swap the scheduler for `supercronic`/`cron` (the `entrypoint.sh` is small and
-  documented for this).
+**Change the schedule:** edit `backup/crontab` (5-field cron) and rebuild
+(`docker compose up -d --build`). Default `30 3 * * *` = daily at 03:30.
 
 ---
 
-## Restoring a backup
+## Architecture notes
 
-To restore, you use Hermes' own import command against an unpacked archive.
-On the machine where you want the data restored (with Hermes installed, or
-using this image interactively):
-
-```bash
-# If encrypted, decrypt first:
-gpg --decrypt hermes-backup-YYYYMMDD-HHMMSS.zip.gpg > hermes-backup.zip
-
-# Stop the gateway before importing to avoid conflicts, then:
-hermes import hermes-backup.zip            # prompts before overwriting
-hermes import hermes-backup.zip --force    # overwrite without prompting
-```
-
-The restored install comes back with memory, skills, and config intact.
-
-> **Test your restores.** A backup you've never restored is a hope, not a
-> backup. Periodically pull an archive and do a dry restore on a scratch
-> profile or throwaway machine.
+The Dockerfile pulls the **amd64** supercronic build, correct for Intel Macs
+and most Linux hosts. On **Apple Silicon** without Rosetta in the Docker
+builder, swap `SUPERCRONIC_URL`/`SUPERCRONIC`/`SUPERCRONIC_SHA1SUM` in
+`backup/Dockerfile` to the `arm64` asset and its checksum from the
+[supercronic releases](https://github.com/aptible/supercronic/releases).
 
 ---
 
 ## Project layout
 
 ```
-hermes-backup-docker/
-├── Dockerfile             # image: Debian + Hermes CLI + rclone + gpg
-├── docker-compose.yml     # volumes + env wiring
-├── .env.example           # copy to .env and edit
-├── .gitignore             # keeps secrets/backups out of git
+hermes-backup/
+├── docker-compose.yml          # the single backup service + named volumes
+├── .env.example                # copy to .env and edit
+├── .gitignore                  # keeps secrets, creds, backups out of git
+├── install-rclone-catalina.sh  # host-side rclone for macOS 10.15
 ├── README.md
-└── scripts/
-    ├── entrypoint.sh      # self-contained scheduler loop
-    └── backup.sh          # backup → (encrypt) → local copy → Drive → prune
+└── backup/
+    ├── Dockerfile              # debian + rclone + supercronic + hermes CLI
+    ├── backup.sh               # hermes backup → (encrypt) → Drive → prune
+    └── crontab                 # supercronic schedule (daily 03:30)
 ```
 
 ---
@@ -205,42 +252,40 @@ hermes-backup-docker/
 ## Troubleshooting
 
 **`hermes CLI not found on PATH` at runtime.**
-The Hermes installer runs at image build time. If it failed (network policy,
-upstream change), the build prints a warning but still completes. Rebuild with
-logs visible: `docker compose build --no-cache --progress=plain` and check the
-Hermes install step. The installer needs outbound access to
-`raw.githubusercontent.com` and `github.com`.
+The Hermes install ran at build time and failed (network policy, upstream
+change, or it expects interactive setup). Rebuild with logs visible:
+`docker compose build --no-cache --progress=plain` and read the Hermes step.
+The installer needs `github.com` + `raw.githubusercontent.com` reachable.
 
 **`rclone remote 'gdrive:' not configured`.**
-The container couldn't find your remote in the mounted `rclone.conf`. Confirm
-`RCLONE_REMOTE` matches the remote name, and that `RCLONE_CONFIG_PATH` points
-at a real file. Test on the host: `rclone --config ./rclone.conf listremotes`.
+Section 4 didn't complete, or `RCLONE_REMOTE` in `.env` doesn't match the name
+you used in `rclone config`. Re-run 4c/4d.
 
-**`HERMES_HOME does not exist or is not mounted`.**
-Set `HERMES_DATA_PATH` in `.env` to your real Hermes directory. A literal `~`
-in compose volume paths can be unreliable depending on your shell/Docker
-version — prefer an absolute path like `/home/youruser/.hermes`.
+**`HERMES_HOME (/data) is not mounted` / empty backup.**
+`HERMES_DATA_PATH` points at the wrong place. Confirm your real Hermes dir:
+`ls ~/.hermes` on the host should show `SOUL.md`, `memories/`, `skills/`,
+`state.db`. Put that absolute path in `.env` and `docker compose up -d`.
 
-**Google OAuth token expired.**
-rclone refreshes tokens automatically, but if Drive was de-authorized you'll
-need to re-run `rclone config` (reconnect) and replace `rclone.conf`.
+**macOS rclone `dyld: Symbol not found` on the host.**
+You're on Catalina with too-new an rclone. Use `./install-rclone-catalina.sh`.
 
-**Backup runs but the upload is slow / partial.**
-A local copy is always written to `./backups/` first, so a failed upload never
-costs you the archive. rclone resumes/retries; check `docker compose logs`.
+**Upload slow or interrupted.**
+A local copy is always written under the staging volume first, so a failed
+upload never costs you the archive. rclone retries; check `docker compose logs`.
 
 ---
 
 ## Security checklist
 
-- Keep `ENCRYPT=true` for off-machine backups (the archive contains secrets).
+- Keep `ENCRYPT=true` for off-machine backups — the archive contains your
+  `.env` with API keys and bot tokens.
 - Store `GPG_PASSPHRASE` in a password manager, never in the repo.
 - `.env` and `rclone.conf` are gitignored — keep it that way.
-- Consider `drive.file` scope (option 3) during `rclone config` to limit the
-  remote's access to only files it creates.
+- Consider `drive.file` scope (option 3 in `rclone config`) to limit the
+  remote to only files it creates.
 
 ---
 
 ## License
 
-MIT. Use, modify, and reuse freely.
+MIT.

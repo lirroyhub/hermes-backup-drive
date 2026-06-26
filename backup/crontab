@@ -1,0 +1,10 @@
+# Hermes Agent backup schedule (supercronic, container-native cron)
+# ------------------------------------------------------------------
+# Timezone is controlled by the TZ env var set on the service in compose.
+# Job output is redirected to PID 1's stdout/stderr so it shows up in
+# `docker compose logs backup`.
+#
+# Field order: minute hour day-of-month month day-of-week  command
+#
+# Runs every day at 03:30 (container TZ).
+30 3 * * * /usr/local/bin/backup.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
