@@ -31,6 +31,10 @@ ENCRYPT="${ENCRYPT:-false}"
 BACKUP_LABEL="${BACKUP_LABEL:-scheduled}"
 # Hermes reads its data from here. /data is the read-only mount of host ~/.hermes.
 export HERMES_HOME="${HERMES_HOME:-/data}"
+# supercronic runs jobs with a minimal PATH. Make sure the Hermes CLI and its
+# managed uv/python (root FHS install) are reachable regardless of how we're
+# invoked (cron vs. interactive `backup-now`).
+export PATH="/usr/local/bin:/usr/local/share/uv/bin:/usr/bin:/bin:${PATH}"
 # ----------------------------------------------------------------------------
 
 DATE="$(date +%Y-%m-%d)"

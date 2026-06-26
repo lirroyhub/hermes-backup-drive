@@ -251,11 +251,15 @@ hermes-backup/
 
 ## Troubleshooting
 
-**`hermes CLI not found on PATH` at runtime.**
-The Hermes install ran at build time and failed (network policy, upstream
-change, or it expects interactive setup). Rebuild with logs visible:
-`docker compose build --no-cache --progress=plain` and read the Hermes step.
-The installer needs `github.com` + `raw.githubusercontent.com` reachable.
+**`hermes CLI not found on PATH` at runtime / build fails on the Hermes step.**
+The image build runs Hermes' installer, which downloads Node.js as a `.tar.xz`
+and shells out to `git`; on debian-slim those decompressors aren't present by
+default. This image pre-installs `xz-utils` and `git` so the install is
+deterministic, and the build now *fails loudly* (runs `hermes --version`) rather
+than shipping a broken image. If it still fails, rebuild with logs visible:
+`docker compose build --no-cache --progress=plain` and read the Hermes step. The
+installer needs `github.com` + `raw.githubusercontent.com` reachable. Note the
+installer uses a root FHS layout (`/usr/local/bin/hermes`), already on PATH.
 
 **`rclone remote 'gdrive:' not configured`.**
 Section 4 didn't complete, or `RCLONE_REMOTE` in `.env` doesn't match the name

@@ -8,6 +8,10 @@ FROM debian:bookworm-slim
 # bash/coreutils  : the backup script is bash and uses date/find/du
 # curl            : fetch supercronic + the Hermes installer (kept; Hermes may
 #                   shell out to it at runtime)
+# xz-utils        : the Hermes installer downloads Node.js as a .tar.xz and needs
+#                   `xz` to extract it; debian-slim does NOT ship it by default.
+# git             : the Hermes installer requires git (it auto-apt-installs it
+#                   otherwise, but we pre-install so the build is deterministic).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         tzdata \
@@ -16,6 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         bash \
         coreutils \
         unzip \
+        xz-utils \
+        git \
         rclone \
     && rm -rf /var/lib/apt/lists/*
 
@@ -41,21 +47,22 @@ RUN curl -fsSLO "$SUPERCRONIC_URL" \
 
 # --- Install the Hermes Agent CLI ------------------------------------------
 # Installed into the image so the container does not rely on a host Hermes
-# install. We only need the CLI binary; the agent's own data lives in the
-# read-only /data mount at runtime (HERMES_HOME is overridden per-run).
-# The installer drops binaries under ~/.local/bin and bundles its own python.
+# install. We only need the CLI; the agent's own data lives in the read-only
+# /data mount at runtime (HERMES_HOME is set per-run by backup.sh).
 #
-# If this upstream installer changes or fails, the build still completes (we
-# don't want a transient network issue to wipe your tooling image); backup.sh
-# verifies `hermes` exists at runtime and gives a clear error otherwise.
-ENV HERMES_INSTALL_HOME=/opt/hermes
-RUN mkdir -p ${HERMES_INSTALL_HOME} \
-    && HOME=${HERMES_INSTALL_HOME} \
-       curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash \
-    || echo "WARNING: Hermes installer exited non-zero; see README troubleshooting."
-
-# Put Hermes + its bundled uv on PATH for all later shells/cron jobs.
-ENV PATH="/opt/hermes/.local/bin:${PATH}"
+# IMPORTANT: when run as root on Linux, the installer ignores $HOME and uses a
+# fixed FHS layout — command at /usr/local/bin/hermes, code under
+# /usr/local/lib/hermes-agent, and its managed uv/python under
+# /usr/local/share/uv. /usr/local/bin is already on PATH, so no PATH edit is
+# needed. We let it use that layout rather than fighting it.
+#
+# Unlike the earlier draft, we DO NOT swallow installer failure: a backup image
+# without a working `hermes` is useless, so we verify the binary exists and the
+# build FAILS loudly if the install didn't complete. The required decompressors
+# (xz-utils) and git are pre-installed above so the install is deterministic.
+RUN curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash \
+    && command -v hermes >/dev/null 2>&1 \
+    && hermes --version
 
 # --- App files --------------------------------------------------------------
 COPY crontab /app/crontab
